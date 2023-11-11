@@ -12,6 +12,8 @@ class UInputMappingContext;
 class USpringArmComponent;
 class UCameraComponent;
 
+class UGroomComponent;
+
 UCLASS()
 class UDEMYCPP_API APlayerCharacter : public ACharacter
 {
@@ -47,4 +49,12 @@ private:
 
 	UPROPERTY(VisibleAnywhere)
 	UCameraComponent* Camera;
+
+	// Hair
+	UPROPERTY(VisibleAnywhere, Category = "Hair")
+	UGroomComponent* Hair;
+
+	// Eyebrows
+	UPROPERTY(VisibleAnywhere, Category = "Hair")
+	UGroomComponent* Eyebrows;
 };

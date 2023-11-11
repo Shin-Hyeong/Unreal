@@ -3,9 +3,14 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "Camera/CameraComponent.h"
 
+// build.cs에 모듈 추가해야함.
 #include "EnhancedInputSubsystems.h"
 #include "EnhancedInputComponent.h"
+
+// CharacterMovement와 관련된 요소를 수정하기 위해서
 #include "GameFramework/CharacterMovementComponent.h"
+// Hair(Groom)를 사용하기 위해서 -> build.cs에 모듈 추가해야함.
+#include "GroomComponent.h"
 
 APlayerCharacter::APlayerCharacter()
 {
@@ -30,6 +35,18 @@ APlayerCharacter::APlayerCharacter()
 
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(CameraBoom);
+
+	// Hair 생성
+	Hair = CreateDefaultSubobject<UGroomComponent>(TEXT("Hair"));
+	// Mesh는 비공개(private)된 변수이기 떄문에 GetMesh()를 통해 접근해야한다.
+	Hair->SetupAttachment(GetMesh());
+	// head라는 소켓(무언가 부착할수 있음)을 만든다.
+	Hair->AttachmentName = FString("head");
+
+	Eyebrows = CreateDefaultSubobject<UGroomComponent>(TEXT("Eyebrows"));
+	Eyebrows->SetupAttachment(GetMesh());
+	Eyebrows->AttachmentName = FString("head");
+
 }
 
 void APlayerCharacter::BeginPlay()
