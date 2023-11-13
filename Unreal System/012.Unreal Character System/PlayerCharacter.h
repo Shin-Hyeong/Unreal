@@ -22,13 +22,16 @@ class UDEMYCPP_API APlayerCharacter : public ACharacter
 public:
 	APlayerCharacter();
 
-	UPROPERTY(EditAnywhere, Category = "InputAction")
+	UPROPERTY(EditAnywhere, Category = "Input Action")
 	UInputAction* MoveAction;
 
-	UPROPERTY(EditAnywhere, Category = "InputAction")
+	UPROPERTY(EditAnywhere, Category = "Input Action")
 	UInputAction* LookAction;
 
-	UPROPERTY(EditAnywhere, Category = "InputAction")
+	UPROPERTY(EditAnywhere, Category = "Input Action")
+	UInputAction* JumpAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input Action")
 	UInputMappingContext* IMC;
 
 
