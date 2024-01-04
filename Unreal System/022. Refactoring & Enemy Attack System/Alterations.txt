@@ -1,0 +1,70 @@
+BaseCharacter.cpp
+-> PlayCharacter와 Enemy가 공통적으로 사용할 변수와 함수를 하나로 만들고 그것을 상속하도록 한다.
+-> PlayCharacter에 있는 것 중 공통으로 필요할 것은
+	1. SetWeaponCollisionEnabled()
+	2. Attack()
+	3. PlayAttackMontage()
+	4. CanAttack()
+	5. AttackEnd()
+	6. EquippedWeapon
+	7. AttackMontage
+-> Enemy에 잇는 것 중 공통으로 필요할 것은
+	1. IHitInterface
+	2. Die()
+	3. PlayHitReactMontage()
+	4. GetHit()
+	5. DirectionalHitReact()
+	6. TakDamage()
+	7. Attributes
+	8. HitReactMontage
+	9. DeathMontage
+	10. DeathMontage
+	11. HitSound
+	12. HitParticles
+-> 각 함수와 변수를 BaseCharacter에 옮긴다.
+	1. PlayrCharacter에 있는 SetWeaponCollisionEnabled()를 지우고 BaseCharacter에 선언하고 구현한다.
+	2. PlayrCharacter에 있는 Attack()은 EnhancedInput에 의한 Player을 위한 기능으로 BaseCharacter에는 Virtual함수로 구현하여 Enemy에 맞는 Attack()을 구현한다. PlayrCharacter의 Attack()은 그대로 둔다.
+	3. PlayrCharacter에 있는 PlayAttackMontage()는 Player을 위한 조건으로 구성되어 있으므로 BaseCharacter에는 Virtual함수로 구현하여 Enemy에 맞는 PlayAttackMontage()을 구현한다.
+	4. PlayrCharacter에 있는 CanAttack()는 Player을 위한 조건으로 구성되어 있으므로 BaseCharacter에는 Virtual함수로 구현하여 Enemy에 맞는 CanAttack()을 구현한다.
+	5. PlayrCharacter에 있는 AttackEnd()는 Player을 위한 조건으로 구성되어 있으므로 BaseCharacter에는 Virtual함수로 구현하여 Enemy에 맞는 AttackEnd()을 구현한다. UFUNCTION()은 부모에만 있어야하므로 BaseCharacter에 넣어주고 PlayerCharacter에 있는 UFUNCTION을 제거한다.
+	6. PlayrCharacter에 있는 AttackMontage/EquippedWeapon를 지우고 BaseCharacter에 선언한다.
+
+	7. Enemy에 있는 Die()는 Enemy을 위한 조건으로 구성되어 있으므로 BaseCharacter에는 Virtual함수로 구현하여 PlayerCharacter에 맞는 Die()을 구현한다.
+	8. Enemy에 있는 PlayHitReactMontage()를 지우고 BaseCharacter에 선언하고 구현한다.
+	9. Enemy가 상속 받고 있던 IHitInterface를 BaseCharacter에 상속하게 하고 Enemy이 상속하지 못하도록 한다. HitInterface를 상속받으면 HitInterface에 있던 GetHit() PlayerCharacter에서 사용할 수 있게 된다.
+	10. Enemy에 있는 DirectionalHitReact()를 지우고 BaseCharacter에 선언하고 구현한다.
+	11. Enemy에 있는 Die()는 TakeDamage 위한 조건으로 구성되어 있으므로 BaseCharacter에는 Virtual함수로 구현하여 PlayerCharacter에 맞는 TakeDamage()을 구현한다.
+	12. Enemy에 있는 Attributes를 지우고 BaseCharacter에 선언하고 구현한다. Enemy의 생성자에서 Attributes를 생성하지 않고 BaseCharacter의 생성자에서 생성한다
+	13. Enemy에 있는 HitReactMontage / DeathMontage / HitSound / HitParticles를 지우고 BaseCharacter에 선언하고 구현한다.
+
+Enemy.BP
+-> 여러 몬스터를 만들기 위해서 Enemy을 자손으로 하여 Paradin.BP를 만들고 기존 Enemy는 Base Enemy로 이름을 변경한다.
+-> Paradin이 무기와 방패를 들수 있도록 소켓을 추가한다.
+-> 공격을 할때 방패가 몸을 통과하는 부자연스러운 현상을 Animation에서 key를 조절하여 수정한다.
+
+Enemy.cpp
+-> #include "BaseCharacter.h"를 추가하고 상속을 ACharacter에서 ABaseCharacter로 변경한다.
+-> Destroyed()를 추가하고 Destroyed()에서 EquippedWeapon를 삭제하도록 한다.
+-> Attack()와 PlayAttackMontage()를 추가하고 Player에 가까이 가면 공격하도록 한다.
+-> 기능들을 리펙토링하여 기능들이 무엇을 하는지 알기 쉽게 만든다.
+-> Attack()에서 EnemyState를 Engaged로 만든다.
+-> AttackEnd()에서 EnemyState를 NoState로 만든다.\
+-> BeginPlay()에 Enemy라는 Tag를 설정한다.
+
+Item.cpp
+-> StaticMesh를 모든 물체를 무시하고 NoCollision으로 설정하여 충돌하지 않도록 한다.
+
+PlayerCharacter.cpp
+-> #include "BaseCharacter.h"를 추가하고 상속을 ACharacter에서 ABaseCharacter로 변경한다.
+-> GetHit()을 추가하여 Enemy의 무기에 의해서 피격 되는 것을 감지한다.
+-> Weapon의 BoxCollision에 충돌이 일어나도록 Mesh의 Type을 WorldDynamic, Channel - WorldDynamic을 Overlap으로 설정한다.
+-> BoxTrace가 일어나도록 Mesh를 Visiblity를 Block으로 설정한다.
+
+CharacterType.cpp
+-> EnemyState에 Dead와 Engaged, NoState를 추가한다.
+-> EnemyState에서 사망 상태를 확인할 것이기 때문에 DeathPose에서 Alive를 제거한다.
+-> Tag를 Player에서 EngageableTarget으로 변경한다.
+
+Weapon.cpp
+-> Enemy의 공격으로 다른 Enemy가 데미지 받는 것을 막는다.
+-> OnBoxOverlap()에서 OtherActor와 Weapon의 Owner와 같은 Tag를 가지고 있으면 공격이 되지 않도록 한다.
