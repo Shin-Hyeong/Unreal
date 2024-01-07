@@ -1,0 +1,38 @@
+Plugin
+-> Motion Warping를 활성화 시킴.
+
+Enemy.BP
+-> 이동하면서 공격하는 Root Motion을 추가한다. (Mixamo)
+-> Motion Warping을 추가한다.
+-> 이벤트 그래프에 Tick Event를 추가하고 Motion Warping의 TranslationTarget과 RotationTarget에 적용되도록 한다.
+	1. CombatTarget이 있는지 확인한다
+	2. Get Translation Warp Target()을 호출한다.
+	3.  Motion Warping에서 Add or Update Warp Target from Location을 호출한다.
+	4.  Get Translation Warp Target()의 Return Value를 Add or Update Warp Target from Location의 TargetLocation에 연결한다.
+	5. WarpTarget Name을 TranslationTarget을 넣는다.
+	6. Get Rotation Warp Target()을 호출한다.
+	7. Motion Warping에서 Add or Update Warp Target from Location을 호출한다.
+	8. WarpTarget Name을 RotationTarget을 넣는다.
+
+RM_EnemyAttack
+-> 공격 모션중 모션 변경이 필요한 구간에 Motion Warping 노티파이를 추가하여 범위를 적용한다.
+	1. Translation를 Warp할 Motion Warping과 Rotation을 Warp할 Motion Warping을 두개 만든다.
+-> Motion Warping의 Detail에서
+	1.  Root Motion Modifier를 Skew Warp를 설정한다.
+	2. Warp Target Name(Warp을 할 목표 대상)을 Translation를 적용할 Warping에는 TranslationTarget으로 설정한다.
+	3. Warp Target Name(Warp을 할 목표 대상)을 Rotation를 적용할 Warping에는 RotationTarget으로 설정한다.
+	4. Translation를 적용할 Warping에는 Warp Taranslation (true), Ignore ZAxis (true), Warp Rotation (false)
+	5. Rotation를 적용할 Warping에는 Warp Taranslation (false), Ignore ZAxis (false), Warp Rotation (true)
+	6. Rotation Type -  Default : Warp Target에 대해서 변하면서 그 변형이 일치할 때까지 부드럽게 바뀜.
+				   Facing : Warp Target을 바라보면서 변형을 일으킴.
+
+Enemy.cpp
+-> 공격 모션 중에 공격 받으면 HitReact이 나오고 AttackEnd가 호출 되지 않아 Attack Timer가 계속 돌아가기 떄문에 피격시 GetHIt()에 공격 Timer를 제거한다.
+-> 공격 모션 중에 공격 받으면 진행중이던 Attack Montage를 멈추도록 GetHit()에 StopAttackMontage() 추가 함.
+-> 공격 모션 중에 공격 받으면 무기의 BoxCollision을 NoCollision으로 만든다.
+
+BaseCharacter.cpp
+-> 공격받으면 진행중이던 공격 Montage를 멈추도록 하는 StopAttackMontage()을 구현함.
+-> Root Motion Attack으로 이동하면서 공격하므로 CombatTarget이 위치로 Motion Warp하는 것이 아닌 예측하는 위치를 향해 공격하도록 한다.
+	1. CombatTarget을 바라보도록하는 GetRotationWarpTarget()
+	2. CombatTarget과의 방향을 구해서 그 방향으로 일정 거리 와 CombatTarget의 위치를 더하여 예측 위치를 구하는 GetTranslationWarpTarget()
