@@ -1,0 +1,4 @@
+- ShooterCharacter
+조준 할 때 마우스/게임패드 감도 감소
+
+이동, 조준, 점프, 발사중 Corsshair Spread 퍼짐 정도 변경
