@@ -1,0 +1,828 @@
+#include "Character/ShooterCharacter.h"
+
+// Input
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+
+// Movement
+#include "GameFramework/CharacterMovementComponent.h"
+
+// Camera
+#include "Camera/CameraComponent.h"
+#include "GameFramework/SpringArmComponent.h"
+
+// Sound && Particle
+#include "Kismet/GameplayStatics.h"
+
+// Socket && Particle
+#include "Engine/SkeletalMeshSocket.h"
+
+// Particle
+#include "Particles/ParticleSystemComponent.h"
+
+// AnimMontage
+#include "Animation/AnimMontage.h"
+
+// AItem & Weapon
+#include "Items/Item.h"
+#include "Items/Weapon.h"
+
+// Collision
+#include "Components/BoxComponent.h"
+#include "Components/SphereComponent.h"
+
+// Widget
+#include "Components/WidgetComponent.h"
+
+// Debug
+#include "DrawDebugHelpers.h"
+
+
+AShooterCharacter::AShooterCharacter()
+{
+	PrimaryActorTick.bCanEverTick = true;
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = true;
+	bUseControllerRotationRoll = false;
+
+	GetCharacterMovement()->bOrientRotationToMovement = false;
+	GetCharacterMovement()->RotationRate = FRotator(0.f, 540.f, 0.f);
+	GetCharacterMovement()->JumpZVelocity = JumpVelocity;
+	// 공중에서 이동할 수 있는 비율(0 : 이동 못함. 1: 지상의 이동속도 동일)
+	GetCharacterMovement()->AirControl = AirControlRate;
+
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(RootComponent);
+	CameraBoom->TargetArmLength = 180.f;
+	// 컨트롤러에 의해 회전 허용
+	CameraBoom->bUsePawnControlRotation = true;
+	CameraBoom->SocketOffset = FVector(0.f, 75.f, 50.f);
+
+	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
+	// USpringArmComponent::SocketName : SpringArm의 시작 부분
+	Camera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	// 컨트롤러에 의해 회전이 아닌 카메라붐이 움직이면서 같이 움직여야 함.
+	Camera->bUsePawnControlRotation = false;
+
+	// 장전할때 탄창을 들고 있을 손의 위치를 나타낼 SceneComponent
+	HandSceneComponent = CreateDefaultSubobject<USceneComponent>(TEXT("HandSceneComponent"));
+}
+
+void AShooterCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// 카메라 부드럽게 줌 인&아웃
+	CameraInterpZoom(DeltaTime);
+
+	// 조준 시 마우스 감도 변경
+	SetLookRate();
+
+	// Crosshair 퍼짐 계산
+	CalculateCrosshiarSpread(DeltaTime);
+	
+	// OverlappedCount를 확인해서 Item를 LineTrace로 감지함
+	TraceForItems();
+}
+
+void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	check(PlayerInputComponent);
+
+	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
+	{
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AShooterCharacter::Move);
+		EnhancedInputComponent->BindAction(GamepadLookAction, ETriggerEvent::Triggered, this, &AShooterCharacter::GamepadLook);
+		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AShooterCharacter::MouseLook);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AShooterCharacter::Jump);
+		EnhancedInputComponent->BindAction(FireWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::FireButtonPressed);
+		EnhancedInputComponent->BindAction(FireWeaponAction, ETriggerEvent::Completed, this, &AShooterCharacter::FireButtonReleased);
+		EnhancedInputComponent->BindAction(AimingAction, ETriggerEvent::Started, this, &AShooterCharacter::AimingButtonPressed);
+		EnhancedInputComponent->BindAction(AimingAction, ETriggerEvent::Completed, this, &AShooterCharacter::AimingButtonReleased);
+		EnhancedInputComponent->BindAction(SelectAction, ETriggerEvent::Started, this, &AShooterCharacter::SelectButtonPressed);
+		EnhancedInputComponent->BindAction(SelectAction, ETriggerEvent::Completed, this, &AShooterCharacter::SelectButtonReleased);
+		EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AShooterCharacter::ReloadButtonPressed);
+	}
+}
+
+FVector AShooterCharacter::GetCameraInterpLocation()
+{
+	const FVector CameraWorldLocation{ Camera->GetComponentLocation() };
+	const FVector CameraForward{ Camera->GetForwardVector() };
+	// 목적지 = CameraWorldLocation + Forward * A + Up * B
+
+	return CameraWorldLocation
+		+ CameraForward * CameraInterpDistance
+		+ FVector(0.f, 0.f, CameraInterpElevation);
+}
+
+void AShooterCharacter::GetPickupItem(AItem* Item)
+{
+	AWeapon* Weapon = Cast<AWeapon>(Item);
+	if (Weapon)
+	{
+		SwapWeapon(Weapon);
+		if(Weapon->GetEquipSound())
+			PlaySound(Weapon->GetEquipSound());
+	}
+}
+
+float AShooterCharacter::GetCrosshairSpreadMultiplier() const
+{
+	return CrosshairSpreadMultiplier;
+}
+
+void AShooterCharacter::IncrementOverlappedItemCount(int8 Amount)
+{
+	// OverlappedItemCount가 음수가 되지 않도록 함
+	if (OverlappedItemCount + Amount <= 0)
+	{
+		OverlappedItemCount = 0;
+		bShouldTraceForItems = false;
+	}
+	else 
+	{
+		OverlappedItemCount += Amount;
+		bShouldTraceForItems = true;
+	}
+}
+
+void AShooterCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	PlayerController = Cast<APlayerController>(GetController());
+
+	// Input Mapping Context 설정
+	if (PlayerController)
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
+		{
+			Subsystem->AddMappingContext(IMC, 0);
+		}
+	}
+
+	// 애님인스턴스 설정
+	AnimInstance = GetMesh()->GetAnimInstance();
+	
+	// 카메라 설정값 적용
+	if (Camera)
+	{
+		CameraDefaultFOV = GetCamera()->FieldOfView;
+		CameraCurrentFOV = CameraDefaultFOV;
+	}
+
+	// 기본 무기 생성 및 장착
+	EquipWeapon(SpawnDefaultWeapon());
+	// 기본 총알 갯수 지급
+	InitializeAmmoMap();
+}
+
+void AShooterCharacter::SwapWeapon(AWeapon* WeaponToSwap)
+{
+	DropWeapon();
+	EquipWeapon(WeaponToSwap);
+	TraceHitItem = nullptr;
+	TraceHitItemLastFrame = nullptr;
+}
+
+bool AShooterCharacter::WeaponHasAmmo()
+{
+	if (EquippedWeapon == nullptr) return false;
+
+	return EquippedWeapon->GetAmmo() > 0;
+}
+
+bool AShooterCharacter::CarryingAmmo()
+{
+	if (EquippedWeapon == nullptr) return false;
+
+	EAmmoType AmmoType = EquippedWeapon->GetAmmoType();
+	// AmmoMap에서 AmmoType의 키값이 있는지 확인
+	if (AmmoMap.Contains(AmmoType))
+	{
+		// AmmoType키에 맞는 값을 찾아서 비교
+		return AmmoMap[AmmoType] > 0;
+	}
+
+	// AmmoMap에 없는 키값을 가지고 있으면
+	return false;
+}
+
+/** Input */
+void AShooterCharacter::Move(const FInputActionValue& value)
+{
+	const FVector2D MovementValue = value.Get<FVector2D>();
+	// 게임패드 스틱 쏠림 현상 방지
+	bool bInputX = MovementValue.X > GamepadSticklean || MovementValue.X < -GamepadSticklean;
+	bool bInputY = MovementValue.Y > GamepadSticklean || MovementValue.Y < -GamepadSticklean;
+
+	if (Controller != nullptr && (bInputX || bInputY))
+	{
+		const FRotator ControlRotation = GetControlRotation();
+		const FRotator YawRotation(0.f, ControlRotation.Yaw, 0.f);
+		
+		const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+		const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+
+		AddMovementInput(ForwardDir, MovementValue.Y);
+		AddMovementInput(RightDir, MovementValue.X);
+	}
+}
+
+/** Input */
+void AShooterCharacter::Jump()
+{
+	if (Controller != nullptr)
+	{
+		ACharacter::Jump();
+	}
+}
+
+/** input */
+void AShooterCharacter::MouseLook(const FInputActionValue& value)
+{
+	FVector2D LookAxisVector = value.Get<FVector2D>();
+
+	if (Controller != nullptr)
+	{
+		AddControllerYawInput(LookAxisVector.X * MouseTurnRate);
+		AddControllerPitchInput(LookAxisVector.Y * MouseLookUpRate );
+	}
+}
+
+/** Input */
+void AShooterCharacter::GamepadLook(const FInputActionValue& value)
+{
+	FVector2D LookAxisVector = value.Get<FVector2D>();
+
+	// 게임패드 스틱 쏠림 현상 방지
+	bool bInputX = LookAxisVector.X > GamepadSticklean || LookAxisVector.X < -GamepadSticklean;
+	bool bInputY = LookAxisVector.Y > GamepadSticklean || LookAxisVector.Y < -GamepadSticklean;
+
+	if (Controller != nullptr && (bInputX || bInputY))
+	{
+		AddControllerYawInput(LookAxisVector.X * GamepadTurnRate * GetWorld()->GetDeltaSeconds());
+		AddControllerPitchInput(LookAxisVector.Y * GamepadLookUpRate * GetWorld()->GetDeltaSeconds());
+	}
+}
+
+/** Input */
+void AShooterCharacter::FireWeapon()
+{
+	if (EquippedWeapon == nullptr) return;
+	if (CombatState != ECombatState::ECS_Unoccupied) return;
+
+	if (WeaponHasAmmo())
+	{
+		// AnimMontage의 Notify로 FireBullet를 호출함
+		PlayMontage(HipFireMontage, FName("StartFire"));
+
+		/* Call in AnimBlueprint */
+		// FireBullet();
+
+		// 발사로 인해 Crosshair 퍼짐 확장
+		StartCrosshairBulletFire();
+
+		// 총을 발사하여 총알 1개 소모
+		EquippedWeapon->DecrementAmmo();
+
+		StartFireTimer();
+	}
+
+}
+
+void AShooterCharacter::AimingButtonPressed()
+{
+	bAiming = true;
+}
+
+void AShooterCharacter::AimingButtonReleased()
+{
+	bAiming = false;
+}
+
+void AShooterCharacter::SelectButtonPressed()
+{
+	if (TraceHitItem)
+	{
+		TraceHitItem->StartItemCurve(this);
+
+		if (TraceHitItem->GetPickupSound())
+		{
+			PlaySound(TraceHitItem->GetPickupSound());
+		}
+	}
+}
+
+void AShooterCharacter::SelectButtonReleased()
+{
+
+}
+
+void AShooterCharacter::ReloadButtonPressed()
+{
+	ReloadWeapon();
+}
+
+/** Function can call in Blueprint */
+void AShooterCharacter::FireBullet()
+{
+	if (EquippedWeapon == nullptr) return;
+
+	// 총소리
+	PlaySound(FireSound);
+
+	const USkeletalMeshSocket* BarrelSocket = EquippedWeapon->GetItemMesh()->GetSocketByName("BarrelSocket");
+
+	
+	if (BarrelSocket && MuzzleFlash)
+	{
+		const FTransform SocketTransform = BarrelSocket->GetSocketTransform(EquippedWeapon->GetItemMesh());
+
+		// 발사 이펙트
+		SpawnParticle(MuzzleFlash, SocketTransform);
+
+		// Line Trace
+		FVector BeamEnd;
+		bool bHitObject{ false };
+		// BeamEnd set in Function GetBeamEndLocation
+		bool bBeamEnd = GetBeamEndLocation(SocketTransform.GetLocation(), BeamEnd, bHitObject);
+
+		if (bBeamEnd)
+		{
+			// Bullet Trajectory Tail
+			BulletBeam(SocketTransform, BeamEnd); 
+
+			// Bullet Hit Target Object Impact
+			if (bHitObject)
+				SpawnParticle(ImpactParticles, BeamEnd);
+		}
+	}
+}
+
+/** Play Montage */
+void AShooterCharacter::PlayMontage(UAnimMontage* Montage, const FName& SectionName)
+{
+	if (AnimInstance && Montage)
+	{
+		AnimInstance->Montage_Play(Montage);
+		AnimInstance->Montage_JumpToSection(SectionName);
+	}
+}
+
+/** Camera smoothly Zoom In/Out  */
+void AShooterCharacter::CameraInterpZoom(float DeltaTime)
+{
+	if (bAiming)
+	{
+		// FInterpTo(A, B, DeltaTime, Speed) : A에서 B까지의 사이값 내에서 DeltaTime * Speed 백분율 만큼 이동한 값
+		CameraCurrentFOV = FMath::FInterpTo(CameraCurrentFOV, CameraZoomedFOV, DeltaTime, ZoomSpeed);
+	}
+	else
+	{
+		CameraCurrentFOV = FMath::FInterpTo(CameraCurrentFOV, CameraDefaultFOV, DeltaTime, ZoomSpeed);
+	}
+	GetCamera()->SetFieldOfView(CameraCurrentFOV);
+}
+
+/** Set BaseTurnRate and BaseLookUpRate based on Aiming */
+void AShooterCharacter::SetLookRate()
+{
+	if (bAiming)
+	{
+		GamepadTurnRate = GamepadAimingTurnRate;
+		GamepadLookUpRate = GamepadAimingLookUpRate;
+
+		MouseTurnRate = MouseAimingTurnRate;
+		MouseLookUpRate = MouseAimingLookUpRate;
+	}
+	else
+	{
+		GamepadTurnRate = GamepadHipTurnRate;
+		GamepadLookUpRate = GamepadHipLookUpRate;
+
+		MouseTurnRate = MouseHipTurnRate;
+		MouseLookUpRate = MouseHipLookUpRate;
+	}
+}
+
+AWeapon* AShooterCharacter::SpawnDefaultWeapon()
+{
+	if (DefaultWeaponClass)
+	{
+		return GetWorld()->SpawnActor<AWeapon>(DefaultWeaponClass);
+	}
+
+	return nullptr;
+}
+
+void AShooterCharacter::InitializeAmmoMap()
+{
+	AmmoMap.Add(EAmmoType::EAT_9mm, Starting9mmAmmo);
+	AmmoMap.Add(EAmmoType::EAT_AR, StartingARAmmo);
+}
+
+void AShooterCharacter::EquipWeapon(AWeapon* WeaponToEquip)
+{
+	if (WeaponToEquip)
+	{
+		const USkeletalMeshSocket* HandSocket = GetMesh()->GetSocketByName(FName("RightHandSocket"));
+		if (HandSocket)
+		{
+			HandSocket->AttachActor(WeaponToEquip, GetMesh());
+
+			EquippedWeapon = WeaponToEquip;
+			// 아이템을 현재 장착중인 상태로 변경
+			// 변경된 상태에 맞게 Collision 설정
+			EquippedWeapon->SetItemState(EItemState::EIS_Equipped);
+		}
+	}
+}
+
+void AShooterCharacter::DropWeapon()
+{
+	if (EquippedWeapon)
+	{
+		FDetachmentTransformRules DetachmentTransformRules(EDetachmentRule::KeepWorld, true);
+		EquippedWeapon->GetItemMesh()->DetachFromComponent(DetachmentTransformRules);
+
+		EquippedWeapon->SetItemState(EItemState::EIS_Falling);
+		EquippedWeapon->ThrowWeapon();
+	}
+}
+
+void AShooterCharacter::ReloadWeapon()
+{
+	if (CombatState != ECombatState::ECS_Unoccupied) return;
+	if (EquippedWeapon == nullptr) return;
+
+	// 여분의 총알이 있는지 확인, 현재 탄창이 가득 차 있는지 확인
+	if (CarryingAmmo() && !(EquippedWeapon->ClipIsFull()))
+	{
+		CombatState = ECombatState::ECS_Reloading;
+		// 재장전 모션 재생
+		PlayMontage(ReloadMontage, EquippedWeapon->GetReloadMontageSection());
+	}
+}
+
+// ReloadMontage의 Notify에 의해서 호출
+void AShooterCharacter::FinishReloading()
+{
+	CombatState = ECombatState::ECS_Unoccupied; 
+	if (EquippedWeapon == nullptr) return;
+	const EAmmoType AmmoType{ EquippedWeapon->GetAmmoType() };
+
+	if (AmmoMap.Contains(AmmoType))
+	{
+		// Player가 가지고 있는 여분 총알 갯수
+		int32 CarriedAmmo = AmmoMap[AmmoType];
+		
+		// 빈 탄창을 채울 양
+		const int32 MagEmptySpace = 
+			EquippedWeapon->GetMagazineCapacity() - EquippedWeapon->GetAmmo();
+
+		// 채워야 하는 양이 가지고 있는 양보다 많으면
+		if (MagEmptySpace > CarriedAmmo)
+		{
+			// 가지고 있는 양 모두 사용
+			EquippedWeapon->ReloadAmmo(CarriedAmmo);
+			CarriedAmmo = 0;
+			//  AmmoMap 업데이트
+			AmmoMap.Add(AmmoType, CarriedAmmo);
+		}
+		else
+		{
+			// 필요한 양만 사용
+			EquippedWeapon->ReloadAmmo(MagEmptySpace);
+			CarriedAmmo -= MagEmptySpace;
+			//  AmmoMap 업데이트
+			AmmoMap.Add(AmmoType, CarriedAmmo);
+		}
+	}
+}
+
+// ReloadMontage의 Notify에서 호출
+void AShooterCharacter::GrapClip()
+{
+	if (EquippedWeapon == nullptr) return;
+	if (HandSceneComponent == nullptr) return;
+	
+	// 장착중인 무기의 탄창 Bone 번호 
+	int32 ClipBoneIndex{EquippedWeapon->GetItemMesh()->GetBoneIndex(EquippedWeapon->GetClipBoneName())};
+
+	// 탄창의 처음 Transform 값 저장
+	ClipTransform = EquippedWeapon->GetItemMesh()->GetBoneTransform(ClipBoneIndex);
+
+	// ShooterCharacter의 Hand_L에 HandSceneComponent를 부착함.
+	FAttachmentTransformRules AttachmentRules(EAttachmentRule::KeepRelative, true);
+	HandSceneComponent->AttachToComponent(GetMesh(), AttachmentRules, FName(TEXT("Hand_L")));
+	// HandSceneComponent의 위치는 탄창의 처음 위치로 함.
+	HandSceneComponent->SetWorldTransform(ClipTransform);
+
+	EquippedWeapon->SetMovingClip(true);
+}
+
+// ReloadMontage의 Notify에서 호출
+void AShooterCharacter::ReplaceClip()
+{
+	if (EquippedWeapon == nullptr) return;
+
+	EquippedWeapon->SetMovingClip(false);
+}
+
+/** Spawn Particle by Transform */
+UParticleSystemComponent* AShooterCharacter::SpawnParticle(UParticleSystem* ParticleName, const FTransform& SpawnTransform)
+{
+	if (ParticleName)
+	{
+		return UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), ParticleName, SpawnTransform);
+	}
+	return nullptr;
+}
+
+/** Spawn Particle by FVector*/
+UParticleSystemComponent* AShooterCharacter::SpawnParticle(UParticleSystem* ParticleName, const FVector& SpawnVector)
+{
+	if (ParticleName)
+	{
+		return UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), ParticleName, SpawnVector);
+	}
+	return nullptr;
+}
+
+/** Bullet Trajectory*/
+void AShooterCharacter::BulletBeam(const FTransform& SocketTransform, const FVector& BeamEndPoint)
+{
+	UParticleSystemComponent* Beam = SpawnParticle(BeamParticles, SocketTransform);
+	if (Beam)
+	{
+		// BeamParticle에 있는 Target FVector변수를 BeamEndPoint로 업데이트함.
+		Beam->SetVectorParameter(FName("Target"), BeamEndPoint);
+	}
+}
+
+/** Play Sound */
+void AShooterCharacter::PlaySound(USoundBase* SoundName)
+{
+	if (SoundName)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, SoundName, GetActorLocation());
+	}
+}
+
+/** Line Trace, Screen To World*/
+bool AShooterCharacter::GetBeamEndLocation(const FVector& MuzzleSocketLocation, FVector& OutBeamLocation, bool& bHitObject)
+{
+	// Check for crosshair trace hit
+	FHitResult CrosshairHitResult;
+	bool bShot{ false };
+	bool bCrosshairHit = TraceUnderCrosshairs(CrosshairHitResult, OutBeamLocation, bShot);
+
+	if (bCrosshairHit)
+	{
+		// Tentative beam location - still need to trace from gun
+		OutBeamLocation = CrosshairHitResult.Location;
+		bHitObject = true;
+	}
+	else // no crosshair trace hit
+	{
+		// OutBeamLocation is the End Location for the line trace
+	}
+
+	/** Line Trace by Gun Barrel */
+		// Perform a second Trace, this time from the gun barrel
+	FHitResult WeaponTraceHit;
+	const FVector WeaponTraceStart{ MuzzleSocketLocation };
+	// Start To End : 총구부터 CrosshairLineTrace에서 충돌 지점까지의 거리
+	const FVector StartToEnd{ OutBeamLocation - MuzzleSocketLocation };
+
+	// MuzzleSocketLocation에서 OutBeamLocation으로 LineTrace를 하면 
+	// 가끔씩 거리가 부족하여 충돌이 일어나지 않을 수 있음
+
+	// 총구에서 StartToEnd의 1.25배를 더하여 확실하게 해당 물체에 닺도록 함
+	const FVector WeaponTraceEnd{ MuzzleSocketLocation + StartToEnd * 1.25f };
+	GetWorld()->LineTraceSingleByChannel(
+		WeaponTraceHit,
+		WeaponTraceStart,
+		WeaponTraceEnd,
+		ECollisionChannel::ECC_Visibility
+	);
+	if (WeaponTraceHit.bBlockingHit)
+	{
+		OutBeamLocation = WeaponTraceHit.Location;
+	}
+
+	if (bShot)
+	{
+		return true;
+	}
+
+	return false;
+
+}
+
+bool AShooterCharacter::TraceUnderCrosshairs(FHitResult& OutHitResult, FVector& OutHitLocation, bool& bShot)
+{
+	// Get Viewport Size
+	FVector2D ViewportSize;
+	if (GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->GetViewportSize(ViewportSize);
+	}
+
+	// Get Screen space location of crosshair
+	FVector2D CrosshairLocation{ ViewportSize.X / 2.f, ViewportSize.Y / 2.f };
+	FVector CrosshairWorldPosition;
+	FVector CrosshairWorldDirection;
+
+
+	// Get World positon and Direction of Crosshairs
+	// WorldPosition, WorldDirection : Output
+	bool bScreenToWorld = UGameplayStatics::DeprojectScreenToWorld( 
+		PlayerController,
+		CrosshairLocation,
+		CrosshairWorldPosition, // Output
+		CrosshairWorldDirection // Output
+	);
+
+	// LineTrace
+	if (bScreenToWorld)
+	{
+		const FVector Start{ CrosshairWorldPosition };
+		const FVector End{ Start + CrosshairWorldDirection * WeaponRange };
+		OutHitLocation = End;
+		GetWorld()->LineTraceSingleByChannel(
+			OutHitResult,
+			Start,
+			End,
+			ECollisionChannel::ECC_Visibility
+		);
+
+		bShot = true;
+
+		if (OutHitResult.bBlockingHit)
+		{
+			OutHitLocation = OutHitResult.Location;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void AShooterCharacter::TraceForItems()
+{
+	if (bShouldTraceForItems)
+	{
+		// 아이템을 바라보면 Widget이 보이도록 함
+		FHitResult ItemTraceResult;
+		FVector HitLocation;
+		bool bShot;
+		TraceUnderCrosshairs(ItemTraceResult, HitLocation, bShot);
+		if (ItemTraceResult.bBlockingHit)
+		{
+			TraceHitItem = Cast<AItem>(ItemTraceResult.GetActor());
+			if (TraceHitItem && TraceHitItem->GetPickupWidget())
+			{
+				// Show Item's piuk up Widget
+				// AreaSphere 안에 있는 Item만 보이도록 함
+				TraceHitItem->SetWidgetVisibility(true);
+			}
+
+			// 이전 frame에서 item를 감지한 상태이면
+			if (TraceHitItemLastFrame)
+			{
+				// 현재 frame과 이전 frame과 감지하고 있는 대상이 다르면
+				if (TraceHitItem != TraceHitItemLastFrame)
+				{
+					// 이전 frame에서 감지했던 Item의 Widget를 비활성화 함.
+					// 혹은 현재 frame에 감지 실패하여 HitItem이 Null이면
+					TraceHitItemLastFrame->GetPickupWidget()->SetVisibility(false);
+				}
+			}
+
+			// Cast가 실패하면 HitItem에 Null이 들어감
+			// Cast가 성공해서 item이 들어가면 다음 Frame과 비교하기 위해서 저장
+			TraceHitItemLastFrame = TraceHitItem;
+		}
+	}
+	// Item를 감지하여 WIdget를 활성화한 상태에서 AreaSphere를 벗어나 bShouldTraceForItems가 false가 되어
+	// LineTrace를 못하는 상황에서 이미 감지 하고 있던 Item의 Widget를 비활성화 시킴.
+	else if (TraceHitItemLastFrame)
+	{
+		TraceHitItemLastFrame->GetPickupWidget()->SetVisibility(false);
+	}
+}
+
+void AShooterCharacter::CalculateCrosshiarSpread(float DeltaTime)
+{
+	FVector2D WalkSpeedRange{ 0.0f, GetCharacterMovement()->MaxWalkSpeed};
+	FVector2D VelocityMultiplierRange{ 0.0f, 1.0f };
+	FVector Velocity{ GetVelocity() };
+	Velocity.Z = 0.f;
+
+	// WalkSpeedRange(0 ~ 600) Clamp Range (0 ~ 1)
+	// Calculate Crosshair velocity factor
+	CrosshairVelocityFactor = FMath::GetMappedRangeValueClamped(WalkSpeedRange, VelocityMultiplierRange, Velocity.Size());
+
+	// Calculate Crosshair in air factor
+	// CrosshairInAirFactor를 Target까지 DeltaTime * InterpSpead 만큼 변화
+	if (GetCharacterMovement()->IsFalling())
+	{
+		// Spread the crosshairs slowly while in air
+		CrosshairInAirFactor = FMath::FInterpTo(CrosshairInAirFactor, 2.25f, DeltaTime, 2.25f);
+	}
+	else // Character is on the ground
+	{
+		CrosshairInAirFactor = FMath::FInterpTo(CrosshairInAirFactor, 0.f, DeltaTime, 30.f);
+	}
+
+	// Calculate crosshair Aim factor
+	if (bAiming)
+	{
+		CrosshairAimFactor = FMath::FInterpTo(CrosshairAimFactor, 0.6f, DeltaTime, 30.f);
+	}
+	else // Not Aiming
+	{
+		CrosshairAimFactor = FMath::FInterpTo(CrosshairAimFactor, 0.0f, DeltaTime, 30.f);
+	}
+
+	// True ShootTimeDuration(0.05s) after firing
+	if (bFiringBullet)
+	{
+		CrosshairShooingFactor = FMath::FInterpTo(CrosshairShooingFactor, 0.3f, DeltaTime, 60.f);
+	}
+	else
+	{
+		CrosshairShooingFactor = FMath::FInterpTo(CrosshairShooingFactor, 0.0f, DeltaTime, 60.f);
+	}
+
+	// 0.5f : 기본 Crosshair 퍼짐정도
+	// CrosshairSpreadMultiplier : 0.5f + (0 ~ 1.0f) + (0 ~ 2.25f) - (0 ~ 0.6f)
+	CrosshairSpreadMultiplier = 0.5f
+		+ CrosshairVelocityFactor // 이동
+		+ CrosshairInAirFactor // 공중
+		- CrosshairAimFactor // 조준
+		+ CrosshairShooingFactor; // 사격
+}
+
+void AShooterCharacter::StartCrosshairBulletFire()
+{
+	bFiringBullet = true;
+
+	// ShootTimeDuration(0.05s) 이후 FinishCrossHairBulletFire()를 1번 호출 함
+	GetWorldTimerManager().SetTimer(CrosshairShootTimer, 
+		this, 
+		&AShooterCharacter::FinishCrosshairBulletFire, 
+		ShootTimeDuration
+	);
+}
+
+void AShooterCharacter::FinishCrosshairBulletFire()
+{
+	bFiringBullet = false;
+}
+
+void AShooterCharacter::FireButtonPressed()
+{
+	bFireButtonPressed = true;
+	FireWeapon();
+}
+
+void AShooterCharacter::FireButtonReleased()
+{
+	bFireButtonPressed = false;
+}
+
+void AShooterCharacter::StartFireTimer()
+{
+	CombatState = ECombatState::ECS_FireTimerInProgress;
+
+	GetWorldTimerManager().SetTimer(
+		AutoFireTimer, 
+		this, 
+		&AShooterCharacter::AutoFireReset,
+		AutomaticFireRate
+	);
+}
+
+void AShooterCharacter::AutoFireReset()
+{
+	CombatState = ECombatState::ECS_Unoccupied;
+
+	// 총알이 남아 있으면
+	if (WeaponHasAmmo())
+	{
+		// 발사 버튼을 누르고 있는 상태이면
+		if (bFireButtonPressed)
+		{
+			FireWeapon();
+		}
+	}
+	else
+	{
+		ReloadWeapon();
+	}
+}
